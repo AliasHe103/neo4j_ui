@@ -1,10 +1,11 @@
 <!-- src/components/graph/Graph.vue -->
 <script setup>
-import {onMounted, ref} from 'vue'
+import {onMounted, ref, watch} from 'vue'
 import {useGraphStore} from '@/stores/graph'
 import cytoscape from 'cytoscape'
 import {getNodeColor} from "@/utils/color.js";
 
+const props = defineProps(['resetCounter'])
 const graphStore = useGraphStore()
 const graph = ref({})
 let cyInstance = null
@@ -14,6 +15,7 @@ const tooltip = ref({
   y: 0,
   data: {},
 })
+const highlightedEdges = new Set()
 
 //初始化图谱画布
 const initCy = () => {
@@ -97,6 +99,19 @@ const bindTooltipEvents = () => {
         properties: props
       }
     }
+
+    const edgeId = edge.id() || edge.data('id')
+    const isHighlighted = highlightedEdges.has(edgeId)
+    if (isHighlighted) {
+      highlightedEdges.delete(edgeId)
+      edge.style('line-color', '#ccc')
+      edge.style('width', 2)
+    }
+    else {
+      highlightedEdges.add(edgeId)
+      edge.style('line-color', '#f00')
+      edge.style('width', 4)
+    }
   })
   cyInstance.on('mouseout', 'node', function() {
     tooltip.value.show = false
@@ -114,7 +129,7 @@ const updateGraphData = async () => {2
 const updateCy = () => {
   if (!cyInstance) return
   const {nodes, links} = graph.value
-  console.log('original graph nodes:', nodes, 'links:', links)
+  // console.log('original graph nodes:', nodes, 'links:', links)
   const cyNodes = nodes.map(node => ({
     data: {
       id: node.id.toString(),
@@ -131,7 +146,7 @@ const updateCy = () => {
     }
   }))
 
-  console.log('cy nodes:', cyNodes, 'edges:', cyEdges)
+  // console.log('cy nodes:', cyNodes, 'edges:', cyEdges)
   cyInstance.elements().remove()
   cyInstance.add([...cyNodes])
   cyInstance.add([...cyEdges])
@@ -146,7 +161,22 @@ const renderCy = async () => {
   updateCy()
 }
 
+watch(() => props.resetCounter, (oldValue, newValue) => {
+  if (oldValue !== undefined) {
+    console.log('Reset the positon of KG.')
+    // cyInstance.fit()
+    cyInstance.animate({
+      fit: {
+        elements: cyInstance.elements(),
+        padding: 50
+      },
+      duration: 500,
+    })
+  }
+})
+
 onMounted(() => {
+
   initCy()
   renderCy()
 })
