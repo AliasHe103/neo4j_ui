@@ -2,9 +2,9 @@ import axios from 'axios'
 import {ElMessage} from "element-plus"
 
 const instance = axios.create({
-    // Todo
-    baseURL: "http://localhost:5000",
-    timeout: 10000
+    // 服务器公网开放端口
+    baseURL: "http://202.38.69.241:30412",
+    timeout: 200000
 })
 
 instance.interceptors.request.use(

@@ -1,0 +1,470 @@
+<script setup lang="js">
+import { onMounted, ref, watch } from 'vue'
+import { useGraphStore } from '@/stores/graph'
+import * as d3 from 'd3'
+import { getNodeColor } from "@/utils/color.js";
+
+const props = defineProps(['resetCounter'])
+const graphStore = useGraphStore()
+const graph = ref({})
+const svgEl = ref(null)
+let simulation = null
+const tooltip = ref({
+  show: false,
+  x: 0,
+  y: 0,
+  data: {},
+})
+const highlightedEdges = new Set()
+
+// 新增：控制分层加载的变量
+const currentDepth = ref(0)  // 当前已加载的深度
+const allNodes = ref([])     // 所有节点数据
+const allLinks = ref([])     // 所有边数据
+const maxDepth = ref(0)      // 最大深度值
+const loadedNodeIds = ref(new Set())  // 已加载的节点ID集合
+
+// 当前可见的节点和边（用于D3数据绑定）
+const visibleNodes = ref([])
+const visibleLinks = ref([])
+
+// 布局配置 - 调整为适合动态添加的参数
+const layoutConfig = {
+  nodeRepulsion: -1000,  // 节点排斥力，类似fcose的nodeRepulsion
+  idealEdgeLength: 80,  // 理想边长
+  edgeStrength: 0.6,     // 边强度，类似edgeElasticity
+  gravity: 0.4,          // 重力
+  alphaDecay: 0.01,      // alpha衰减率，控制模拟速度
+  velocityDecay: 0.4,    // 速度衰减
+}
+
+// 初始化图谱画布
+const initD3 = () => {
+  const container = document.getElementById('d3-container')
+  const width = container.clientWidth
+  const height = container.clientHeight
+
+  const svg = d3.select(svgEl.value)
+    .attr('width', width)
+    .attr('height', height)
+    .attr('viewBox', [0, 0, width, height])
+
+  const g = svg.append('g')
+
+  // 初始化模拟
+  simulation = d3.forceSimulation()
+    .force('link', d3.forceLink().id(d => d.id).distance(layoutConfig.idealEdgeLength).strength(layoutConfig.edgeStrength))
+    .force('charge', d3.forceManyBody().strength(layoutConfig.nodeRepulsion))
+    .force('center', d3.forceCenter(width / 2, height / 2).strength(layoutConfig.gravity))
+    .alphaDecay(layoutConfig.alphaDecay)
+    .velocityDecay(layoutConfig.velocityDecay)
+
+  // 缩放
+  const zoom = d3.zoom()
+    .scaleExtent([0.1, 10])
+    .on('zoom', (event) => {
+      g.attr('transform', event.transform)
+      updateFontSize(event.transform.k)
+    })
+  svg.call(zoom)
+
+  // 绑定工具提示和交互事件
+  bindEvents(g)
+
+  // 模拟tick更新渲染
+  simulation.on('tick', () => {
+    g.selectAll('.link')
+      .attr('x1', d => d.source.x)
+      .attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x)
+      .attr('y2', d => d.target.y)
+
+    g.selectAll('.node-group')
+      .attr('transform', d => `translate(${d.x},${d.y})`)
+  })
+}
+
+// 绑定交互事件（在更新时重新绑定）
+const bindEvents = (g) => {
+  // 节点事件
+  g.selectAll('.node-group')
+    .on('mouseover', function(event, d) {
+      const containerRect = svgEl.value.getBoundingClientRect()
+      const x = event.clientX - containerRect.left + 15
+      const y = event.clientY - containerRect.top + 15
+      tooltip.value = {
+        show: true,
+        x: x,
+        y: y,
+        data: {
+          elementType: 'node',
+          id: d.id,
+          labels: d.labels,
+          properties: d.properties
+        }
+      }
+    })
+    .on('mouseout', () => {
+      tooltip.value.show = false
+    })
+    .call(d3.drag()
+      .on('start', dragstarted)
+      .on('drag', dragged)
+      .on('end', dragended)
+    )
+
+  // 边事件
+  g.selectAll('.link')
+    .on('click', function(event, d) {
+      const edgeId = `${d.source.id}-${d.target.id}`
+      const isHighlighted = highlightedEdges.has(edgeId)
+      if (isHighlighted) {
+        highlightedEdges.delete(edgeId)
+        d3.select(this).attr('stroke', '#ccc').attr('stroke-width', 2)
+      } else {
+        highlightedEdges.add(edgeId)
+        d3.select(this).attr('stroke', '#f00').attr('stroke-width', 4)
+      }
+
+      // 显示tooltip
+      const containerRect = svgEl.value.getBoundingClientRect()
+      const x = event.clientX - containerRect.left + 15
+      const y = event.clientY - containerRect.top + 15
+      tooltip.value = {
+        show: true,
+        x: x,
+        y: y,
+        data: {
+          elementType: 'edge',
+          source: d.source.id,
+          target: d.target.id,
+          label: d.type,
+          properties: d.properties
+        }
+      }
+    })
+    .on('mouseout', () => {
+      tooltip.value.show = false
+    })
+}
+
+// 更新字体大小根据缩放
+const updateFontSize = (zoomLevel = 1) => {
+  const baseFontSize = 15
+  const fontSize = baseFontSize * Math.max(zoomLevel, 1)
+  d3.select(svgEl.value).selectAll('text').style('font-size', fontSize)
+}
+
+// 拖拽函数
+function dragstarted(event, d) {
+  if (!event.active) simulation.alphaTarget(0.3).restart()
+  d.fx = d.x
+  d.fy = d.y
+}
+
+function dragged(event, d) {
+  d.fx = event.x
+  d.fy = event.y
+}
+
+function dragended(event, d) {
+  if (!event.active) simulation.alphaTarget(0)
+  d.fx = null
+  d.fy = null
+}
+
+// 加载并处理数据
+const updateGraphData = async () => {
+  await graphStore.loadEvidence()
+  const { nodes, links } = graphStore.graph
+  graph.value = graphStore.graph
+  
+  // 存储所有节点和边，适配D3格式
+  allNodes.value = nodes.map(node => {
+    const props = node.properties || {}
+    const displayLabel = props.text || (node.labels[0] || 'Node')
+    return {
+      id: node.id.toString(),
+      labels: [...node.labels],
+      properties: props,
+      displayLabel: displayLabel,
+      depth: props.depth ?? 0,
+      color: getNodeColor(node.labels)  // 预计算颜色
+    }
+  })
+  allLinks.value = links.map(link => ({
+    source: link.from.toString(),
+    target: link.to.toString(),
+    type: link.type?.toString() || '',
+    properties: link.properties,
+    id: `edge-${link.from}-${link.to}`  // 用于高亮
+  }))
+  
+  // 计算最大深度
+  maxDepth.value = Math.max(
+    ...allNodes.value.map(node => node.depth), 
+    0
+  )
+  
+  // 重置已加载节点集合
+  loadedNodeIds.value.clear()
+  
+  // 初始只加载depth 0的节点和相关边
+  currentDepth.value = 0
+  loadNodesByDepth(currentDepth.value)
+}
+
+// 根据深度加载节点和相关边（动态添加版本）
+const loadNodesByDepth = (depth) => {
+  // 1. 筛选当前深度的新节点（不包括已加载的）
+  const newNodes = allNodes.value.filter(node => {
+    const nodeDepth = node.depth
+    const nodeId = node.id
+    return nodeDepth === depth && !loadedNodeIds.value.has(nodeId)
+  })
+  
+  if (newNodes.length === 0) {
+    return
+  }
+  
+  // 2. 标记这些节点为已加载
+  newNodes.forEach(node => {
+    loadedNodeIds.value.add(node.id)
+  })
+  
+  // 3. 筛选连接新节点和已加载节点的边
+  const newLinks = allLinks.value.filter(link => {
+    const sourceId = link.source
+    const targetId = link.target
+    
+    const isSourceNew = newNodes.some(n => n.id === sourceId)
+    const isTargetNew = newNodes.some(n => n.id === targetId)
+    const isSourceLoaded = loadedNodeIds.value.has(sourceId)
+    const isTargetLoaded = loadedNodeIds.value.has(targetId)
+    
+    return (isSourceNew && isTargetLoaded) || (isTargetNew && isSourceLoaded)
+  })
+  
+  // 4. 添加到可见数据（D3会使用这些数据）
+  visibleNodes.value.push(...newNodes)
+  visibleLinks.value.push(...newLinks)
+  
+  // 5. 更新D3图谱
+  updateD3Graph(newNodes)  // 传递newNodes用于动画
+}
+
+// 更新D3图谱渲染
+const updateD3Graph = (newNodes = []) => {
+  const g = d3.select(svgEl.value).select('g')
+
+  // 更新边
+  const link = g.selectAll('.link')
+    .data(visibleLinks.value, d => d.id)
+  
+  const linkEnter = link.enter().append('line')
+    .attr('class', 'link')
+    .attr('stroke', '#ccc')
+    .attr('stroke-width', 2)
+    .attr('marker-end', 'url(#arrow)')  // 如果需要箭头，可添加defs
+
+  link.merge(linkEnter)
+  
+  link.exit().remove()
+
+  // 更新节点组（包含circle和text）
+  const nodeGroup = g.selectAll('.node-group')
+    .data(visibleNodes.value, d => d.id)
+  
+  const nodeEnter = nodeGroup.enter().append('g')
+    .attr('class', 'node-group')
+  
+  // 添加circle
+  nodeEnter.append('circle')
+    .attr('r', 0)  // 初始半径0，用于动画
+    .attr('fill', d => d.color)
+    .attr('stroke', '#fff')
+    .attr('stroke-width', 1)
+    .attr('opacity', 0)  // 初始透明
+    .transition()
+    .duration(500)
+    .attr('r', 30)  // 假设节点半径15
+    .attr('opacity', 1)
+
+  // 添加text
+  nodeEnter.append('text')
+    .text(d => d.displayLabel)
+    .attr('dy', '.35em')
+    .attr('text-anchor', 'middle')
+    .attr('font-size', 15)
+    .attr('opacity', 0)
+    .transition()
+    .duration(500)
+    .attr('opacity', 1)
+
+  nodeGroup.merge(nodeEnter)
+  
+  nodeGroup.exit().remove()
+
+  // 重新绑定事件
+  bindEvents(g)
+
+  // 更新模拟，保留现有位置
+  simulation.nodes(visibleNodes.value)
+  simulation.force('link').links(visibleLinks.value)
+  simulation.alpha(1).restart()  // 重启模拟以调整新节点
+}
+
+// 加载下一层深度的节点
+const loadNextDepth = () => {
+  if (currentDepth.value >= maxDepth.value) return
+  
+  currentDepth.value += 1
+  loadNodesByDepth(currentDepth.value)
+}
+
+// 设置定时器自动加载后续节点
+const startAutoLoading = () => {
+  // 初始延迟1秒，然后每2秒加载一层
+  setTimeout(() => {
+    const interval = setInterval(() => {
+      loadNextDepth()
+      if (currentDepth.value >= maxDepth.value) {
+        clearInterval(interval)
+      }
+    }, 2000)
+  }, 1000)
+}
+
+const renderD3 = async () => {
+  await updateGraphData()
+  // 数据加载完成后开始自动加载
+  startAutoLoading()
+}
+
+watch(() => props.resetCounter, (oldValue) => {
+  if (oldValue !== undefined) {
+    // 重置时清空图谱
+    d3.select(svgEl.value).select('g').selectAll('*').remove()
+    loadedNodeIds.value.clear()
+    currentDepth.value = 0
+    visibleNodes.value = []
+    visibleLinks.value = []
+    loadNodesByDepth(currentDepth.value)
+    // 缩放动画
+    d3.select(svgEl.value).transition().duration(500).call(
+      d3.zoom().transform,
+      d3.zoomIdentity
+    )
+  }
+})
+
+onMounted(() => {
+  initD3()
+  renderD3()
+})
+</script>
+
+<template>
+  <div class="graph-container" id="d3-container">
+    <!-- D3 SVG 主容器 -->
+    <svg ref="svgEl" class="d3-svg"></svg>
+    
+    <!-- 显示当前加载进度 -->
+    <div class="loading-status">
+      当前深度: {{ currentDepth }} / {{ maxDepth }}
+    </div>
+
+    <!-- 工具提示 -->
+    <Teleport to="body">
+      <div
+          v-if="tooltip.show"
+          class="cy-tooltip"
+          :style="{
+          top: `${tooltip.y}px`,
+          left: `${tooltip.x}px`
+        }"
+      >
+        <div class="tooltip-header">
+          {{ tooltip.data.elementType === 'node' ? '节点详情' : '关系详情' }}
+        </div>
+        <div class="tooltip-body">
+          <div v-if="tooltip.data.labels && tooltip.data.labels.length > 0" class="prop-item">
+            <strong>label:</strong> {{ tooltip.data.labels.join(', ') }}
+          </div>
+          <hr v-if="tooltip.data.labels && tooltip.data.labels.length > 0" style="margin: 8px 0; border:0; border-top: 1px dashed #eee" />
+          <div
+              v-for="(value, key) in tooltip.data.properties"
+              :key="key"
+              class="prop-item"
+          >
+            <strong>{{ key }}:</strong> {{ (value) }}
+          </div>
+        </div>
+      </div>
+    </Teleport>
+  </div>
+</template>
+
+<style scoped>
+.graph-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+}
+
+.d3-svg {
+  width: 100%;
+  height: 100%;
+  background-color: #fafafa;
+  z-index: 1;
+  position: relative;
+}
+
+.loading-status {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.cy-tooltip {
+  position: fixed;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  padding: 12px;
+  font-size: 14px;
+  max-width: 300px;
+  min-width: 200px;
+  word-wrap: break-word;
+  pointer-events: none;
+  z-index: 1000;
+  transform: translate(10px, 10px);
+}
+.tooltip-header {
+  font-weight: bold;
+  color: #2c3e50;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 4px;
+}
+.prop-item {
+  margin: 4px 0;
+  font-family: sans-serif;
+  line-height: 1.4;
+}
+
+/* 节点默认样式 */
+:deep(.node-group circle) {
+  transition: all 0.3s ease;
+}
+</style>

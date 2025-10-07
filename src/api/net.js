@@ -1,15 +1,15 @@
+import request from '@/utils/request'
 // SSE处理流数据
-const SSE_SERVER = 'http://localhost:5000';
+const SSE_SERVER = "http://202.38.69.241:30412";
 export function createSSE(url, {
-    onMessage = () => {},
+    onMessage = () => { },
     onError = (error) => console.error('SSE Error:', error),
-    onOpen = () => {},
-    onClose = () => {},
+    onOpen = () => { },
+    onClose = () => { },
     withCredentials = false
 } = {}) {
     let eventSource = null;
     let isClosed = false;
-    let buffer = '';
     url = SSE_SERVER + url;
 
     try {
@@ -61,7 +61,7 @@ export function createSSE(url, {
     } catch (error) {
         onError(error);
         return {
-            close: () => {},
+            close: () => { },
             isOpen: false,
             isConnecting: false,
             isClosed: true
@@ -70,13 +70,12 @@ export function createSSE(url, {
 }
 
 // AI推理流式响应的SSE客户端
-export function createAIStreamingClient(url='http://localhost:5000/api/stream', {
-    onToken = () => {},
+export function createAIStreamingClient(url = 'http://localhost:5000/api/stream', {
+    onToken = () => { },
     onComplete = () => {
     },
     onError = (error) => console.error('AI Streaming Error:', error)
 } = {}) {
-    let lastToken = '';
 
     return createSSE(url, {
         onMessage: (data) => {
@@ -99,3 +98,20 @@ export function createAIStreamingClient(url='http://localhost:5000/api/stream', 
         }
     });
 }
+
+export const getPrediction = (question) => {
+    return request({
+        url: '/api/predict',
+        method: 'post',
+        data: {
+            question: question
+        }
+    })
+}
+
+export const getEvidence = () => {
+    return request({
+      url: '/api/evidence',
+      method: 'get'
+    })
+  }

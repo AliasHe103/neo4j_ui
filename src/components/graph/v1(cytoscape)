@@ -1,0 +1,445 @@
+<script setup lang="js">
+import { onMounted, ref, watch, nextTick } from 'vue'
+import { useGraphStore } from '@/stores/graph'
+import cytoscape from 'cytoscape'
+import spread from 'cytoscape-spread'
+import fcose from 'cytoscape-fcose'
+import { getNodeColor } from "@/utils/color.js";
+
+cytoscape.use(spread)
+cytoscape.use(fcose)
+const props = defineProps(['resetCounter'])
+const graphStore = useGraphStore()
+const graph = ref({})
+let cyInstance = null
+const tooltip = ref({
+  show: false,
+  x: 0,
+  y: 0,
+  data: {},
+})
+const highlightedEdges = new Set()
+
+// 新增：控制分层加载的变量
+const currentDepth = ref(0)  // 当前已加载的深度
+const allNodes = ref([])     // 所有节点数据
+const allLinks = ref([])     // 所有边数据
+const maxDepth = ref(0)      // 最大深度值
+const loadedNodeIds = ref(new Set())  // 已加载的节点ID集合
+
+// 布局配置 - 调整为适合动态添加的参数
+const cyLayout = {
+  name: 'fcose',
+  animate: true,  // 开启动画
+  fit: true,
+  padding: 100,
+  nodeRepulsion: 4500,  // 减小排斥力，使新节点更容易融入
+  idealEdgeLength: 150,
+  edgeElasticity: 0.4,  // 增加弹性，使连接更自然
+  nestingFactor: 0.05,
+  gravity: 0.2,
+  numIter: 1000,  // 减少迭代次数，加快动态添加速度
+  layerSeparation: 200,
+  uniformNodeDimensions: false,
+  tile: false,  // 关闭平铺，允许更自然的布局
+  useLocalSearch: true,
+  localSearchIterations: 100,
+  // 关键参数：保留现有节点位置，只调整新节点
+  presets: {}
+}
+
+// 初始化图谱画布
+const initCy = () => {
+  cyInstance = cytoscape({
+    container: document.getElementById('cy'),
+    elements: [],
+    style: [
+      {
+        selector: 'node',
+        style: {
+          'label': 'data(displayLabel)',
+          'background-color': function(node) {
+            const labels = node.data('labels')
+            return getNodeColor(labels)
+          },
+          'font-size': 6,
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'text-outline-color': '#fff',
+          'text-outline-width': 1
+        }
+      },
+      {
+        selector: 'edge',
+        style: {
+          'width': 2,
+          'line-color': '#ccc',
+          'target-arrow-color': '#ccc',
+          'target-arrow-shape': 'triangle',
+          'curve-style': 'bezier',
+          'label': 'data(label)',
+          'font-size': 6,
+          'text-rotation': 'autorotate',
+          'text-background-color': '#fff',
+          'text-background-opacity': 0.8,
+          'text-background-padding': '1px'
+        }
+      },
+      // 为新添加的节点添加过渡动画
+      {
+        selector: '.new-node',
+        style: {
+          'opacity': 0,
+          'width': 0,
+          'height': 0
+        }
+      }
+    ]
+  })
+
+  bindTooltipEvents()
+  cyInstance.on('zoom', updateFontSize)
+}
+
+// 绑定工具提示事件（保持不变）
+const bindTooltipEvents = () => {
+  cyInstance.on('mouseover', 'node', function(event) {
+    const node = event.target
+    const props = node.data('properties') || {}
+
+    const containerRect = document.getElementById('cy').getBoundingClientRect()
+    const x = event.originalEvent.clientX - containerRect.left + 15
+    const y = event.originalEvent.clientY - containerRect.top + 15
+    tooltip.value = {
+      show: true,
+      x: x,
+      y: y,
+      data: {
+        elementType: 'node',
+        id: node.id(),
+        labels: node.data('labels'),
+        properties: props
+      }
+    }
+  })
+  cyInstance.on('tap', 'edge', function(event) {
+    const edge = event.target
+    const props = edge.data('properties') || {}
+    const containerRect = document.getElementById('cy').getBoundingClientRect()
+    const x = event.originalEvent.clientX - containerRect.left + 15
+    const y = event.originalEvent.clientY - containerRect.top + 15
+    tooltip.value = {
+      show: true,
+      x: x,
+      y: y,
+      data: {
+        elementType: 'edge',
+        source: edge.data('source'),
+        target: edge.data('target'),
+        label: edge.data('label'),
+        properties: props
+      }
+    }
+
+    const edgeId = edge.id() || edge.data('id')
+    const isHighlighted = highlightedEdges.has(edgeId)
+    if (isHighlighted) {
+      highlightedEdges.delete(edgeId)
+      edge.style('line-color', '#ccc')
+      edge.style('width', 2)
+    } else {
+      highlightedEdges.add(edgeId)
+      edge.style('line-color', '#f00')
+      edge.style('width', 4)
+    }
+  })
+  cyInstance.on('mouseout', 'node', function() {
+    tooltip.value.show = false
+  })
+  cyInstance.on('mouseout', 'edge', function() {
+    tooltip.value.show = false
+  })
+}
+
+// 更新字体大小（保持不变）
+const updateFontSize = () => {
+  if (!cyInstance) return
+  const zoom = cyInstance.zoom()
+  const baseFontSize = 6
+  const fontSize = Math.max(2, Math.min(baseFontSize * zoom / 5, 6))
+  cyInstance.nodes().style('font-size', fontSize)
+  cyInstance.edges().style('font-size', fontSize)
+}
+
+// 加载并处理数据
+const updateGraphData = async () => {
+  await graphStore.loadEvidence()
+  const { nodes, links } = graphStore.graph
+  graph.value = graphStore.graph
+  
+  // 存储所有节点和边
+  allNodes.value = nodes
+  allLinks.value = links
+  
+  // 计算最大深度
+  maxDepth.value = Math.max(
+    ...nodes.map(node => node.properties?.depth ?? 0), 
+    0
+  )
+  
+  // 重置已加载节点集合
+  loadedNodeIds.value.clear()
+  
+  // 初始只加载depth 0的节点和相关边
+  currentDepth.value = 0
+  loadNodesByDepth(currentDepth.value)
+}
+
+// 根据深度加载节点和相关边（动态添加版本）
+const loadNodesByDepth = (depth) => {
+  if (!cyInstance) return
+  
+  // 1. 筛选当前深度的新节点（不包括已加载的）
+  const newNodes = allNodes.value.filter(node => {
+    const nodeDepth = node.properties?.depth ?? 0
+    const nodeId = node.id.toString()
+    // 只选择当前深度且未加载的节点
+    return nodeDepth === depth && !loadedNodeIds.value.has(nodeId)
+  })
+  
+  if (newNodes.length === 0) {
+    // 没有新节点需要添加
+    return
+  }
+  
+  // 2. 标记这些节点为已加载
+  newNodes.forEach(node => {
+    loadedNodeIds.value.add(node.id.toString())
+  })
+  
+  // 3. 筛选连接新节点和已加载节点的边
+  const newEdges = allLinks.value.filter(link => {
+    const sourceId = link.from.toString()
+    const targetId = link.to.toString()
+    
+    // 边的一端是新节点，另一端是已加载节点
+    const isSourceNew = newNodes.some(n => n.id.toString() === sourceId)
+    const isTargetNew = newNodes.some(n => n.id.toString() === targetId)
+    const isSourceLoaded = loadedNodeIds.value.has(sourceId)
+    const isTargetLoaded = loadedNodeIds.value.has(targetId)
+    
+    return (isSourceNew && isTargetLoaded) || (isTargetNew && isSourceLoaded)
+  })
+  
+  // 4. 转换为Cytoscape格式，为新节点添加标识类
+  const cyNodes = newNodes.map(node => {
+    const props = node.properties || {}
+    const displayLabel = props.name || (node.labels[0] || 'Node')
+    return {
+      data: {
+        id: node.id.toString(),
+        labels: [...node.labels],
+        properties: props,
+        displayLabel: displayLabel,
+        depth: props.depth ?? 0
+      },
+      classes: 'new-node'  // 标记新节点，用于动画
+    }
+  })
+  
+  const cyEdges = newEdges.map(link => ({
+    data: {
+      id: `edge-${link.from}-${link.to}`,
+      source: link.from.toString(),
+      target: link.to.toString(),
+      label: link.type?.toString() || '',
+      properties: link.properties
+    }
+  }))
+  
+  // 5. 保存现有节点的位置，用于布局预设
+  const presets = {}
+  cyInstance.nodes().forEach(node => {
+    presets[node.id()] = {
+      x: node.position().x,
+      y: node.position().y
+    }
+  })
+  
+  // 6. 添加新元素到图谱
+  cyInstance.add([...cyNodes, ...cyEdges])
+  
+  // 7. 对新节点应用出现动画
+  cyInstance.nodes('.new-node').animate({
+    style: {
+      'opacity': 1,
+      'width': 30,  // 假设节点默认宽度
+      'height': 30  // 假设节点默认高度
+    }
+  }, {
+    duration: 500
+  }).removeClass('new-node')
+  
+  // 8. 应用布局，保持现有节点位置
+  cyInstance.layout({
+    ...cyLayout,
+    presets: presets  // 固定现有节点位置
+  }).run()
+}
+
+// 加载下一层深度的节点
+const loadNextDepth = () => {
+  if (currentDepth.value >= maxDepth.value) return
+  
+  currentDepth.value += 1
+  loadNodesByDepth(currentDepth.value)
+}
+
+// 设置定时器自动加载后续节点
+const startAutoLoading = () => {
+  // 初始延迟1秒，然后每2秒加载一层
+  setTimeout(() => {
+    const interval = setInterval(() => {
+      loadNextDepth()
+      if (currentDepth.value >= maxDepth.value) {
+        clearInterval(interval)
+      }
+    }, 2000)
+  }, 1000)
+}
+
+const renderCy = async () => {
+  await updateGraphData()
+  // 数据加载完成后开始自动加载
+  startAutoLoading()
+}
+
+watch(() => props.resetCounter, (oldValue) => {
+  if (oldValue !== undefined) {
+    // 重置时清空图谱
+    cyInstance.elements().remove()
+    loadedNodeIds.value.clear()
+    currentDepth.value = 0
+    loadNodesByDepth(currentDepth.value)
+    cyInstance.animate({
+      fit: {
+        elements: cyInstance.elements(),
+        padding: 50
+      },
+      duration: 500,
+    })
+  }
+})
+
+onMounted(() => {
+  initCy()
+  renderCy()
+})
+</script>
+
+<template>
+  <div class="graph-container">
+    <!-- Cytoscape 主容器 -->
+    <div id="cy" class="cytoscape"></div>
+    
+    <!-- 显示当前加载进度 -->
+    <div class="loading-status">
+      当前深度: {{ currentDepth }} / {{ maxDepth }}
+    </div>
+
+    <!-- 工具提示 -->
+    <Teleport to="body">
+      <div
+          v-if="tooltip.show"
+          class="cy-tooltip"
+          :style="{
+          top: `${tooltip.y}px`,
+          left: `${tooltip.x}px`
+        }"
+      >
+        <div class="tooltip-header">
+          {{ tooltip.data.elementType === 'node' ? '节点详情' : '关系详情' }}
+        </div>
+        <div class="tooltip-body">
+          <div v-if="tooltip.data.labels && tooltip.data.labels.length > 0" class="prop-item">
+            <strong>label:</strong> {{ tooltip.data.labels.join(', ') }}
+          </div>
+          <hr v-if="tooltip.data.labels && tooltip.data.labels.length > 0" style="margin: 8px 0; border:0; border-top: 1px dashed #eee" />
+          <div
+              v-for="(value, key) in tooltip.data.properties"
+              :key="key"
+              class="prop-item"
+          >
+            <strong>{{ key }}:</strong> {{ (value) }}
+          </div>
+        </div>
+      </div>
+    </Teleport>
+  </div>
+</template>
+
+<style scoped>
+.graph-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+}
+
+.cytoscape {
+  width: 100%;
+  height: 100%;
+  background-color: #fafafa;
+  z-index: 1;
+  position: relative;
+}
+
+.loading-status {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.cy-tooltip {
+  position: fixed;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  padding: 12px;
+  font-size: 14px;
+  max-width: 300px;
+  min-width: 200px;
+  word-wrap: break-word;
+  pointer-events: none;
+  z-index: 1000;
+  transform: translate(10px, 10px);
+}
+.tooltip-header {
+  font-weight: bold;
+  color: #2c3e50;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 4px;
+}
+.prop-item {
+  margin: 4px 0;
+  font-family: sans-serif;
+  line-height: 1.4;
+}
+
+/* 节点默认样式 */
+:deep(node) {
+  width: 30px;
+  height: 30px;
+  transition: all 0.3s ease;
+}
+</style>
