@@ -4,6 +4,9 @@ import { useGraphStore } from '@/stores/graph'
 import * as d3 from 'd3'
 import { getNodeColor } from "@/utils/color.js";
 
+const props = defineProps({
+  depth: Number
+})
 const graphStore = useGraphStore()
 const graph = ref({})
 const svgEl = ref(null)
@@ -49,9 +52,7 @@ const initD3 = () => {
     .attr('viewBox', [0, 0, width, height])
 
   const mainG = svg.append('g')  // 主组
-
   const linkGroup = mainG.append('g').attr('class', 'links')  // 边组，先添加
-
   const nodeGroup = mainG.append('g').attr('class', 'nodes')  // 节点组，后添加
 
   // 初始化模拟
@@ -93,20 +94,20 @@ function calculateEndpoint(d, isSource) {
   const dx = d.target.x - d.source.x
   const dy = d.target.y - d.source.y
   const dr = Math.sqrt(dx * dx + dy * dy)
-  if (dr === 0) return isSource ? {x: d.source.x, y: d.source.y} : {x: d.target.x, y: d.target.y}  // 避免除零
+  if (dr === 0) return isSource ? { x: d.source.x, y: d.source.y } : { x: d.target.x, y: d.target.y }  // 避免除零
   const radius = 30  // 节点半径
   const offsetX = (dx / dr) * radius
   const offsetY = (dy / dr) * radius
-  return isSource 
-    ? {x: d.source.x + offsetX, y: d.source.y + offsetY}
-    : {x: d.target.x - offsetX, y: d.target.y - offsetY}
+  return isSource
+    ? { x: d.source.x + offsetX, y: d.source.y + offsetY }
+    : { x: d.target.x - offsetX, y: d.target.y - offsetY }
 }
 
 // 绑定交互事件（在更新时重新绑定）
 const bindEvents = (linkGroup, nodeGroup) => {
-  // 节点事件
+  // 悬浮显示详细信息
   nodeGroup.selectAll('.node-group')
-    .on('mouseover', function(event, d) {
+    .on('mouseover', function (event, d) {
       const containerRect = svgEl.value.getBoundingClientRect()
       const x = event.clientX - containerRect.left + 15
       const y = event.clientY - containerRect.top + 15
@@ -126,14 +127,14 @@ const bindEvents = (linkGroup, nodeGroup) => {
       tooltip.value.show = false
     })
     .call(d3.drag()
-      .on('start', dragstarted)
-      .on('drag', dragged)
-      .on('end', dragended)
+      .on('start', dragStarted)
+      .on('drag', dragIn)
+      .on('end', dragEnded)
     )
 
   // 边事件
   linkGroup.selectAll('.link')
-    .on('click', function(event, d) {
+    .on('click', function (event, d) {
       const edgeId = `${d.source.id}-${d.target.id}`
       const isHighlighted = highlightedEdges.has(edgeId)
       if (isHighlighted) {
@@ -166,7 +167,7 @@ const bindEvents = (linkGroup, nodeGroup) => {
     })
 }
 
-// 更新字体大小根据缩放
+// 根据缩放更新字体大小
 const updateFontSize = (zoomLevel = 1) => {
   const baseFontSize = 15
   const fontSize = baseFontSize * Math.max(zoomLevel, 1)
@@ -174,29 +175,27 @@ const updateFontSize = (zoomLevel = 1) => {
 }
 
 // 拖拽函数
-function dragstarted(event, d) {
+function dragStarted(event, d) {
   if (!event.active) simulation.alphaTarget(0.3).restart()
   d.fx = d.x
   d.fy = d.y
 }
-
-function dragged(event, d) {
+function dragIn(event, d) {
   d.fx = event.x
   d.fy = event.y
 }
-
-function dragended(event, d) {
+function dragEnded(event, d) {
   if (!event.active) simulation.alphaTarget(0)
   d.fx = null
   d.fy = null
 }
 
-// 加载并处理数据
+// Ⅰ.从后端加载并处理数据
 const updateGraphData = async () => {
   await graphStore.loadEvidence()
   const { nodes, links } = graphStore.graph
   graph.value = graphStore.graph
-  
+
   // 存储所有节点和边，适配D3格式
   allNodes.value = nodes.map(node => {
     const props = node.properties || {}
@@ -217,88 +216,98 @@ const updateGraphData = async () => {
     properties: link.properties,
     id: `edge-${link.from}-${link.to}`  // 用于高亮
   }))
-  
+
   // 计算最大深度
   maxDepth.value = Math.max(
-    ...allNodes.value.map(node => node.depth), 
+    ...allNodes.value.map(node => node.depth),
     0
   )
-  
+
   // 重置已加载节点集合
   loadedNodeIds.value.clear()
-  
+
   // 初始只加载depth 0的节点和相关边
   currentDepth.value = 0
-  loadNodesByDepth(currentDepth.value)
 }
 
-// 根据深度加载节点和相关边（动态添加版本）
-const loadNodesByDepth = (depth) => {
+watch(() => props.depth, (newDepth) => {
+  if (newDepth === 1) {
+      loadDataByDepth(currentDepth.value)
+  } else if (newDepth > 1 && newDepth <= maxDepth.value) {
+      loadNextDepth()
+  }
+})
+// Ⅱ.根据深度准备节点和相关边的数据（动态添加版本）
+const loadDataByDepth = (depth) => {
   // 1. 筛选当前深度的新节点（不包括已加载的）
   const newNodes = allNodes.value.filter(node => {
     const nodeDepth = node.depth
     const nodeId = node.id
     return nodeDepth === depth && !loadedNodeIds.value.has(nodeId)
   })
-  
+
   if (newNodes.length === 0) {
     return
   }
-  
+
   // 2. 标记这些节点为已加载
   newNodes.forEach(node => {
     loadedNodeIds.value.add(node.id)
   })
-  
+
   // 3. 筛选连接新节点和已加载节点的边
   const newLinks = allLinks.value.filter(link => {
     const sourceId = link.source
     const targetId = link.target
-    
+
     const isSourceNew = newNodes.some(n => n.id === sourceId)
     const isTargetNew = newNodes.some(n => n.id === targetId)
     const isSourceLoaded = loadedNodeIds.value.has(sourceId)
     const isTargetLoaded = loadedNodeIds.value.has(targetId)
-    
+
     return (isSourceNew && isTargetLoaded) || (isTargetNew && isSourceLoaded)
   })
-  
-  // 4. 添加到可见数据（D3会使用这些数据）
+
+  // 4. 添加到可见数据（D3会使用这些数据更新图谱）
   visibleNodes.value.push(...newNodes)
   visibleLinks.value.push(...newLinks)
-  
+
   // 5. 更新D3图谱
   updateD3Graph(newNodes)  // 传递newNodes用于动画
 }
 
-// 更新D3图谱渲染
+// Ⅲ.更新D3图谱渲染
 const updateD3Graph = () => {
   const mainG = d3.select(svgEl.value).select('g')
   const linkGroup = mainG.select('.links')
   const nodeGroup = mainG.select('.nodes')
 
-  // 更新边
+  // 1.更新边
   const link = linkGroup.selectAll('.link')
     .data(visibleLinks.value, d => d.id)
-  
+
   const linkEnter = link.enter().append('line')
     .attr('class', 'link')
     .attr('stroke', '#ccc')
+    .attr('stroke-opacity', 0)
     .attr('stroke-width', 2)
+    .transition()
+    .duration(1000)
+    .attr('stroke-opacity', 1)
     .attr('marker-end', 'url(#arrow)')  // 如果需要箭头，可添加defs
 
   link.merge(linkEnter)
-  
+
   link.exit().remove()
 
-  // 更新节点组（包含circle和text）
+  // 2.更新节点组（包含circle和text）
   const nodeGroupSel = nodeGroup.selectAll('.node-group')
     .data(visibleNodes.value, d => d.id)
-  
+
   const nodeEnter = nodeGroupSel.enter().append('g')
     .attr('class', 'node-group')
-  
-  // 添加circle
+
+  // 添加node circle
   nodeEnter.append('circle')
     .attr('r', 0)  // 初始半径0，用于动画
     .attr('fill', d => d.color)
@@ -306,11 +315,11 @@ const updateD3Graph = () => {
     .attr('stroke-width', 1)
     .attr('opacity', 0)  // 初始透明
     .transition()
-    .duration(500)
+    .duration(1000)
     .attr('r', 30)  // 节点半径30
     .attr('opacity', 1)
 
-  // 添加text
+  // 添加node text
   nodeEnter.append('text')
     .text(d => d.displayLabel)
     .attr('dy', '.35em')
@@ -322,44 +331,43 @@ const updateD3Graph = () => {
     .attr('opacity', 1)
 
   nodeGroupSel.merge(nodeEnter)
-  
+
   nodeGroupSel.exit().remove()
 
-  // 重新绑定事件
+  // 3.重新绑定事件
   bindEvents(linkGroup, nodeGroup)
 
-  // 更新模拟，保留现有位置
+  // 4.更新模拟，保留现有位置
   simulation.nodes(visibleNodes.value)
   simulation.force('link').links(visibleLinks.value)
   simulation.alpha(1).restart()  // 重启模拟以调整新节点
 }
 
+// Ⅳ.自动控制函数
 // 加载下一层深度的节点
 const loadNextDepth = () => {
   if (currentDepth.value >= maxDepth.value) return
-  
+
   currentDepth.value += 1
-  loadNodesByDepth(currentDepth.value)
+  loadDataByDepth(currentDepth.value)
 }
 
 // 设置定时器自动加载后续节点
-// Todo: 自动加载仅为了展示，不代表实际过程
-const startAutoLoading = () => {
-  // 初始延迟1秒，然后每2秒加载一层
-  setTimeout(() => {
-    const interval = setInterval(() => {
-      loadNextDepth()
-      if (currentDepth.value >= maxDepth.value) {
-        clearInterval(interval)
-      }
-    }, 2000)
-  }, 1000)
-}
+// const startAutoLoading = () => {
+//   setTimeout(() => {
+//     const interval = setInterval(() => {
+//       loadNextDepth()
+//       if (currentDepth.value >= maxDepth.value) {
+//         clearInterval(interval)
+//       }
+//     }, 3000) //加载延迟
+//   }, 1000) //初始延迟
+// }
 
 const renderD3 = async () => {
   await updateGraphData()
   // 数据加载完成后开始自动加载
-  startAutoLoading()
+  // startAutoLoading()
 }
 
 onMounted(() => {
@@ -372,22 +380,18 @@ onMounted(() => {
   <div class="graph-container" id="d3-container">
     <!-- D3 SVG 主容器 -->
     <svg ref="svgEl" class="d3-svg"></svg>
-    
+
     <!-- 显示当前加载进度 -->
-    <div class="loading-status">
-      当前深度: {{ currentDepth }} / {{ maxDepth }}
+    <div class="loading-status" v-if="depth > 0">
+      当前深度: {{ currentDepth + 1 }}
     </div>
 
     <!-- 工具提示 -->
     <Teleport to="body">
-      <div
-          v-if="tooltip.show"
-          class="cy-tooltip"
-          :style="{
-          top: `${tooltip.y}px`,
-          left: `${tooltip.x}px`
-        }"
-      >
+      <div v-if="tooltip.show" class="cy-tooltip" :style="{
+        top: `${tooltip.y}px`,
+        left: `${tooltip.x}px`
+      }">
         <div class="tooltip-header">
           {{ tooltip.data.elementType === 'node' ? '节点详情' : '关系详情' }}
         </div>
@@ -395,12 +399,9 @@ onMounted(() => {
           <div v-if="tooltip.data.labels && tooltip.data.labels.length > 0" class="prop-item">
             <strong>label:</strong> {{ tooltip.data.labels.join(', ') }}
           </div>
-          <hr v-if="tooltip.data.labels && tooltip.data.labels.length > 0" style="margin: 8px 0; border:0; border-top: 1px dashed #eee" />
-          <div
-              v-for="(value, key) in tooltip.data.properties"
-              :key="key"
-              class="prop-item"
-          >
+          <hr v-if="tooltip.data.labels && tooltip.data.labels.length > 0"
+            style="margin: 8px 0; border:0; border-top: 1px dashed #eee" />
+          <div v-for="(value, key) in tooltip.data.properties" :key="key" class="prop-item">
             <strong>{{ key }}:</strong> {{ (value) }}
           </div>
         </div>
@@ -454,6 +455,7 @@ onMounted(() => {
   z-index: 1000;
   transform: translate(10px, 10px);
 }
+
 .tooltip-header {
   font-weight: bold;
   color: #2c3e50;
@@ -461,6 +463,7 @@ onMounted(() => {
   border-bottom: 1px solid #eee;
   padding-bottom: 4px;
 }
+
 .prop-item {
   margin: 4px 0;
   font-family: sans-serif;

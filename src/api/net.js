@@ -70,7 +70,7 @@ export function createSSE(url, {
 }
 
 // AI推理流式响应的SSE客户端
-export function createAIStreamingClient(url = 'http://localhost:5000/api/stream', {
+export function createAIStreamingClient(url = 'http://202.38.69.241:30412/api/streaming', {
     onToken = () => { },
     onComplete = () => {
     },
@@ -99,15 +99,81 @@ export function createAIStreamingClient(url = 'http://localhost:5000/api/stream'
     });
 }
 
-export const getPrediction = (question) => {
+// 修改后的函数，先 POST 数据，再连接 SSE
+export const getPrediction = (question, callback) => {
+    // 首先，发送 POST 请求提交 question
     return request({
-        url: '/api/predict',
-        method: 'post',
-        data: {
-            question: question
-        }
-    })
-}
+      url: '/api/predict',
+      method: 'post',
+      data: {
+        question: question
+      }
+    }).then(response => {
+      if (response.code !== 200) {
+        console.log('In getPrediction, res:', response)
+        throw new Error(response.data.message || "Failed to submit question");
+      }
+  
+      const sseUrl = response.data.sse_url;
+      if (!sseUrl) {
+        throw new Error("SSE URL not provided by server");
+      }
+  
+      // 使用从 POST 响应中获取的 URL 建立 SSE 连接
+      const eventSource = new EventSource( SSE_SERVER + sseUrl);
+  
+      // 返回一个 Promise，允许外部处理 SSE 事件
+      return new Promise((resolve, reject) => {
+        eventSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            // 在这里处理接收到的每个数据块
+            console.log("Received SSE data:", data);
+  
+            // 触发 Vue 组件的更新
+            if (typeof callback === 'function') {
+              callback(data);
+            }
+  
+            // 如果收到最终完成信号，则关闭连接并 resolve Promise
+            if (data.is_final && data.type === 'answer') {
+              console.log("SSE stream ended: final answer received.");
+              eventSource.close();
+              resolve(data); // 或者 resolve(data)，如果需要返回最终数据
+            }
+          } catch (error) {
+            console.error("Error parsing SSE data:", error);
+            eventSource.close();
+            reject(error);
+          }
+        };
+  
+        eventSource.onerror = (error) => {
+          console.error("SSE error:", error);
+          eventSource.close();
+          reject(error);
+        };
+  
+        // 可以设置一个超时
+        // setTimeout(() => {
+        //   eventSource.close();
+        //   reject(new Error('SSE connection timed out'));
+        // }, 30000);
+      });
+    });
+  };
+  
+  
+
+// export const getPrediction = (question) => {
+//     return request({
+//         url: '/api/predict',
+//         method: 'post',
+//         data: {
+//             question: question
+//         }
+//     })
+// }
 
 export const getEvidence = () => {
     return request({

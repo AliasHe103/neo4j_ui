@@ -4,9 +4,10 @@ import { ChatLineRound } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { getPrediction } from "@/api/net";
 
-const query = ref("");
+const query = ref("Who was the governor of Ohio in 2011 that was in the government prior to 3-1-1983?");
 const isLoading = ref(false);
 const emit = defineEmits(["starting-prediction", "prediction-result"]);
+const currentReasoning = ref("");
 
 // 将问题交给/api/predict接口
 const handleSubmit = async () => {
@@ -18,25 +19,27 @@ const handleSubmit = async () => {
   ElMessage.success("提交成功");
   console.log("提交查询:", query.value);
   isLoading.value = true;
+  emit("starting-prediction");
 
   try {
-    emit("starting-prediction")
-    let res = await getPrediction(query.value);
-    console.log("API Response:", res);
-
-    if (res.code === 200 && res.data) {
-      const { llm_prediction_with_graph, llm_prediction } = res.data;
-      console.log("LLM Prediction:", llm_prediction_with_graph, llm_prediction);
-      emit(
-        "prediction-result",
-        {
-          reasoning: llm_prediction_with_graph,
-          answer: llm_prediction
-        }
-      );
-    } else {
-      ElMessage.error(res.message || "请求失败");
+    const handleSSEData = (data) => {
+      if (data.llm_prediction_for_depth !== undefined) {
+        currentReasoning.value = data.llm_prediction_for_depth; // 或 += 追加（如果是流式片段）
+        // 推送推理信息的更新，每个深度一次
+        emit("prediction-result", {
+          type: "reasoning",
+          is_final: data.is_final,
+          reasoning: currentReasoning.value
+        });
+      }
     }
+
+    let res = await getPrediction(query.value, handleSSEData);
+
+    emit("prediction-result", {
+      type: "answer",
+      answer: res.answer + res.timestamp
+    });
   } catch (error) {
     console.error("API Error:", error);
     ElMessage.error("请求失败:" + error);

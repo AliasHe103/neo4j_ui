@@ -21,7 +21,7 @@ import { Open, Setting, Folder } from '@element-plus/icons-vue'
       <el-sub-menu index="1">
         <template #title>
           <el-icon><Open /></el-icon>
-          <span>控制选项</span>
+          <span>图谱推理</span>
         </template>
         <el-menu-item style="padding: 0; display: flex; justify-content: center">
           <el-row style="display: flex; justify-content: center; padding: 8px; width: 100%">
@@ -32,16 +32,16 @@ import { Open, Setting, Folder } from '@element-plus/icons-vue'
 
       <el-sub-menu index="2">
         <template #title>
-          <el-icon><Setting /></el-icon>
-          <span>设置参数</span>
+          <el-icon><Open /></el-icon>
+          <span>图谱补全</span>
         </template>
         <!-- 可在此添加设置项 -->
       </el-sub-menu>
 
       <el-sub-menu index="3">
         <template #title>
-          <el-icon><Folder /></el-icon>
-          <span>保存结果</span>
+          <el-icon><Open /></el-icon>
+          <span>图谱问答</span>
         </template>
         <!-- 可在此添加保存选项 -->
       </el-sub-menu>
